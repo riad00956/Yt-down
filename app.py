@@ -3,6 +3,7 @@ import time
 import yt_dlp
 import asyncio
 import threading
+from flask import Flask
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -13,31 +14,32 @@ from telegram.ext import (
     filters,
 )
 
-# Render Environment Variable
+# --- FLASK SERVER ---
+server = Flask(__name__)
+
+@server.route('/')
+def ping():
+    return "Bot is running!", 200
+
+def run_flask():
+    # Render ডিফল্টভাবে পোর্ট ১০০০০ ব্যবহার করে
+    port = int(os.environ.get("PORT", 10000))
+    server.run(host='0.0.0.0', port=port)
+
+# --- BOT LOGIC ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 def progress_hook(d, context, chat_id, message_id, loop):
     if d["status"] == "downloading":
         current_time = time.time()
         last_update = context.user_data.get("last_update", 0)
-
         if current_time - last_update > 5:
             percentage = d.get("_percent_str", "0%")
             speed = d.get("_speed_str", "0 KB/s")
-            eta = d.get("_eta_str", "0s")
-
-            text = (
-                f"📥 **Downloading...**\n"
-                f"📊 Progress: `{percentage}`\n"
-                f"⚡ Speed: `{speed}`\n"
-                f"⏳ ETA: `{eta}`"
-            )
-
+            text = f"📥 **Downloading...**\n📊 Progress: `{percentage}`\n⚡ Speed: `{speed}`"
             asyncio.run_coroutine_threadsafe(
-                context.bot.edit_message_text(
-                    text=text, chat_id=chat_id, message_id=message_id, parse_mode="Markdown"
-                ),
-                loop,
+                context.bot.edit_message_text(text=text, chat_id=chat_id, message_id=message_id, parse_mode="Markdown"),
+                loop
             )
             context.user_data["last_update"] = current_time
 
@@ -47,8 +49,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
     if not url.startswith("http"): return
-
     status_msg = await update.message.reply_text("🔍 ফরম্যাট চেক করছি...")
+    
     ydl_opts = {"quiet": True, "no_warnings": True}
     if os.path.exists("cookies.txt"): ydl_opts["cookiefile"] = "cookies.txt"
 
@@ -57,7 +59,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
             formats = info.get("formats", [])
-
+        
         keyboard = []
         seen = set()
         for f in formats:
@@ -65,7 +67,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if h and h not in seen and f.get("vcodec") != "none" and f.get("acodec") != "none":
                 keyboard.append([InlineKeyboardButton(f"🎬 {h}p", callback_data=f"{f['format_id']}|{url}")])
                 seen.add(h)
-
         await status_msg.edit_text("✅ কোয়ালিটি বেছে নিন:", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
         await status_msg.edit_text(f"❌ ভুল হয়েছে: {str(e)}")
@@ -89,8 +90,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await query.edit_message_text("🚀 ডাউনলোড শুরু হয়েছে...")
         await loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL(ydl_opts).download([url]))
-        await context.bot.edit_message_text("📤 টেলিগ্রামে আপলোড হচ্ছে...", chat_id=chat_id, message_id=msg_id)
-        
+        await context.bot.edit_message_text("📤 আপলোড হচ্ছে...", chat_id=chat_id, message_id=msg_id)
         with open(file_path, "rb") as vf:
             await context.bot.send_video(chat_id=chat_id, video=vf, caption="✅ ডান!", read_timeout=1000)
         await context.bot.delete_message(chat_id, msg_id)
@@ -100,7 +100,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if os.path.exists(file_path): os.remove(file_path)
 
 async def run_bot():
-    # এটি সরাসরি ইভেন্ট লুপের ভেতর বটের অ্যাপ্লিকেশন সেটআপ করবে
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -110,8 +109,7 @@ async def run_bot():
         await app.initialize()
         await app.updater.start_polling(drop_pending_updates=True)
         await app.start()
-        print("🤖 Bot is running perfectly...")
-        # বটটি চালু রাখার জন্য একটি ইনফিনিট লুপ
+        print("🤖 Bot is running with Flask...")
         while True:
             await asyncio.sleep(3600)
 
@@ -119,7 +117,10 @@ if __name__ == "__main__":
     if not BOT_TOKEN:
         print("Error: BOT_TOKEN missing!")
     else:
-        # মেইন থ্রেডে লুপ এরর এড়াতে সরাসরি asyncio.run ব্যবহার
+        # Flask সার্ভারকে আলাদা থ্রেডে চালানো
+        threading.Thread(target=run_flask, daemon=True).start()
+        
+        # বট চালানো
         try:
             asyncio.run(run_bot())
         except (KeyboardInterrupt, SystemExit):
