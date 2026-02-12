@@ -20,7 +20,7 @@ def progress_hook(d, context, chat_id, message_id, loop):
         current_time = time.time()
         last_update = context.user_data.get("last_update", 0)
 
-        if current_time - last_update > 5:  # Render-এ চাপ কমাতে ৫ সেকেন্ড পর পর আপডেট হবে
+        if current_time - last_update > 5:
             percentage = d.get("_percent_str", "0%")
             speed = d.get("_speed_str", "0 KB/s")
             eta = d.get("_eta_str", "0s")
@@ -58,7 +58,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         with yt_dlp.YoutubeDL(ydl_config) as ydl:
-            info = ydl.extract_info(url, download=False)
+            # loop.run_in_executor ব্যবহার করা হয়েছে যাতে মেইন থ্রেড ব্লক না হয়
+            loop = asyncio.get_running_loop()
+            info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
             formats = info.get("formats", [])
 
         keyboard = []
@@ -111,19 +113,29 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id, f"❌ Failed:\n{str(e)}")
     finally:
         if os.path.exists(file_path):
-            os.remove(file_path)
+            try:
+                os.remove(file_path)
+            except:
+                pass
 
 def main():
     if not BOT_TOKEN:
         print("Error: BOT_TOKEN not found in environment variables!")
         return
+
+    # এখানে সরাসরি run_polling ব্যবহার না করে ইভেন্ট লুপ ম্যানেজ করা হয়েছে
     app = Application.builder().token(BOT_TOKEN).build()
+    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(button_callback))
+    
     print("🤖 Bot is running on Render...")
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True, close_loop=False)
 
 if __name__ == "__main__":
-    main()
-      
+    # এরর এড়াতে মেইন ব্লকটি এভাবে সাজানো হয়েছে
+    try:
+        main()
+    except (KeyboardInterrupt, SystemExit):
+        pass
