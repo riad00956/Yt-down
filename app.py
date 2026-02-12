@@ -2,6 +2,7 @@ import os
 import time
 import yt_dlp
 import asyncio
+import threading
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -12,7 +13,7 @@ from telegram.ext import (
     filters,
 )
 
-# Render Environment Variable থেকে টোকেন নেবে
+# Render Environment Variable
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 def progress_hook(d, context, chat_id, message_id, loop):
@@ -26,7 +27,7 @@ def progress_hook(d, context, chat_id, message_id, loop):
             eta = d.get("_eta_str", "0s")
 
             text = (
-                f"📥 **Downloading Video...**\n\n"
+                f"📥 **Downloading...**\n"
                 f"📊 Progress: `{percentage}`\n"
                 f"⚡ Speed: `{speed}`\n"
                 f"⏳ ETA: `{eta}`"
@@ -34,108 +35,92 @@ def progress_hook(d, context, chat_id, message_id, loop):
 
             asyncio.run_coroutine_threadsafe(
                 context.bot.edit_message_text(
-                    text=text,
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    parse_mode="Markdown",
+                    text=text, chat_id=chat_id, message_id=message_id, parse_mode="Markdown"
                 ),
                 loop,
             )
             context.user_data["last_update"] = current_time
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Hello!\n\nSend me a YouTube link and I will download it for you 🎬")
+    await update.message.reply_text("👋 লিঙ্ক দিন, আমি ডাউনলোড করে দিচ্ছি!")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
-    if not url.startswith("http"):
-        return
+    if not url.startswith("http"): return
 
-    status_msg = await update.message.reply_text("🔍 Fetching quality options...")
-    ydl_config = {"quiet": True, "no_warnings": True}
-    if os.path.exists("cookies.txt"):
-        ydl_config["cookiefile"] = "cookies.txt"
+    status_msg = await update.message.reply_text("🔍 ফরম্যাট চেক করছি...")
+    ydl_opts = {"quiet": True, "no_warnings": True}
+    if os.path.exists("cookies.txt"): ydl_opts["cookiefile"] = "cookies.txt"
 
     try:
-        with yt_dlp.YoutubeDL(ydl_config) as ydl:
-            # loop.run_in_executor ব্যবহার করা হয়েছে যাতে মেইন থ্রেড ব্লক না হয়
-            loop = asyncio.get_running_loop()
+        loop = asyncio.get_running_loop()
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
             formats = info.get("formats", [])
 
         keyboard = []
         seen = set()
         for f in formats:
-            height = f.get("height")
-            if height and height not in seen and f.get("vcodec") != "none" and f.get("acodec") != "none":
-                btn_text = f"🎬 {height}p ({f['ext'].upper()})"
-                callback_data = f"{f['format_id']}|{url}"
-                keyboard.append([InlineKeyboardButton(btn_text, callback_data=callback_data)])
-                seen.add(height)
+            h = f.get("height")
+            if h and h not in seen and f.get("vcodec") != "none" and f.get("acodec") != "none":
+                keyboard.append([InlineKeyboardButton(f"🎬 {h}p", callback_data=f"{f['format_id']}|{url}")])
+                seen.add(h)
 
-        if not keyboard:
-            await status_msg.edit_text("❌ No downloadable formats found.")
-            return
-
-        await status_msg.edit_text("✅ Select Quality:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await status_msg.edit_text("✅ কোয়ালিটি বেছে নিন:", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
-        await status_msg.edit_text(f"❌ Error:\n{str(e)}")
+        await status_msg.edit_text(f"❌ ভুল হয়েছে: {str(e)}")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    format_id, url = query.data.split("|")
-    chat_id = query.message.chat_id
-    message_id = query.message.message_id
-    file_path = f"video_{chat_id}_{int(time.time())}.mp4"
-    context.user_data["last_update"] = 0
+    f_id, url = query.data.split("|")
+    chat_id, msg_id = query.message.chat_id, query.message.message_id
+    file_path = f"vid_{int(time.time())}.mp4"
     loop = asyncio.get_running_loop()
 
     ydl_opts = {
-        "format": f"{format_id}+bestaudio/best",
+        "format": f"{f_id}+bestaudio/best",
         "outtmpl": file_path,
-        "quiet": True,
         "merge_output_format": "mp4",
-        "progress_hooks": [lambda d: progress_hook(d, context, chat_id, message_id, loop)],
+        "progress_hooks": [lambda d: progress_hook(d, context, chat_id, msg_id, loop)],
     }
-    if os.path.exists("cookies.txt"):
-        ydl_opts["cookiefile"] = "cookies.txt"
+    if os.path.exists("cookies.txt"): ydl_opts["cookiefile"] = "cookies.txt"
 
     try:
-        await query.edit_message_text("🚀 Starting download...")
+        await query.edit_message_text("🚀 ডাউনলোড শুরু হয়েছে...")
         await loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL(ydl_opts).download([url]))
-        await context.bot.edit_message_text("📤 Uploading to Telegram...", chat_id=chat_id, message_id=message_id)
+        await context.bot.edit_message_text("📤 টেলিগ্রামে আপলোড হচ্ছে...", chat_id=chat_id, message_id=msg_id)
         
-        with open(file_path, "rb") as video_file:
-            await context.bot.send_video(chat_id=chat_id, video=video_file, supports_streaming=True, caption="✅ Video Ready!", read_timeout=1000, write_timeout=1000)
-        await context.bot.delete_message(chat_id, message_id)
+        with open(file_path, "rb") as vf:
+            await context.bot.send_video(chat_id=chat_id, video=vf, caption="✅ ডান!", read_timeout=1000)
+        await context.bot.delete_message(chat_id, msg_id)
     except Exception as e:
-        await context.bot.send_message(chat_id, f"❌ Failed:\n{str(e)}")
+        await context.bot.send_message(chat_id, f"❌ ফেইলড: {str(e)}")
     finally:
-        if os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-            except:
-                pass
+        if os.path.exists(file_path): os.remove(file_path)
 
-def main():
-    if not BOT_TOKEN:
-        print("Error: BOT_TOKEN not found in environment variables!")
-        return
-
-    # এখানে সরাসরি run_polling ব্যবহার না করে ইভেন্ট লুপ ম্যানেজ করা হয়েছে
+async def run_bot():
+    # এটি সরাসরি ইভেন্ট লুপের ভেতর বটের অ্যাপ্লিকেশন সেটআপ করবে
     app = Application.builder().token(BOT_TOKEN).build()
-    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(button_callback))
     
-    print("🤖 Bot is running on Render...")
-    app.run_polling(drop_pending_updates=True, close_loop=False)
+    async with app:
+        await app.initialize()
+        await app.updater.start_polling(drop_pending_updates=True)
+        await app.start()
+        print("🤖 Bot is running perfectly...")
+        # বটটি চালু রাখার জন্য একটি ইনফিনিট লুপ
+        while True:
+            await asyncio.sleep(3600)
 
 if __name__ == "__main__":
-    # এরর এড়াতে মেইন ব্লকটি এভাবে সাজানো হয়েছে
-    try:
-        main()
-    except (KeyboardInterrupt, SystemExit):
-        pass
+    if not BOT_TOKEN:
+        print("Error: BOT_TOKEN missing!")
+    else:
+        # মেইন থ্রেডে লুপ এরর এড়াতে সরাসরি asyncio.run ব্যবহার
+        try:
+            asyncio.run(run_bot())
+        except (KeyboardInterrupt, SystemExit):
+            pass
